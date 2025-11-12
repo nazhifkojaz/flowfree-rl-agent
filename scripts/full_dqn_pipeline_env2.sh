@@ -113,6 +113,7 @@ Usage: $0 [options]
   --supervised-batch-size N
   --supervised-lr LR     Override supervised learning rate (default: 1e-4)
   --epsilon-start VAL    Starting epsilon for DQN (default: 1.0)
+  --epsilon-end VAL      Ending epsilon for DQN (default: 0.10)
   --complete-bonus VAL   Completion reward bonus (default: 5.0)
   --solve-bonus VAL      Solve reward bonus (default: 20.0)
   --constraint-free-bonus VAL  Bonus when no constraints are violated (default: 5.0)
@@ -196,6 +197,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --epsilon-start)
             EPSILON_START="$2"
+            shift
+            ;;
+        --epsilon-end)
+            EPSILON_END="$2"
             shift
             ;;
         --epsilon-schedule)
