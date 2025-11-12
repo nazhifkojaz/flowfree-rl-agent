@@ -149,6 +149,22 @@ def parse_args(argv: list[str] | None = None) -> DQNTrainingConfig:
     parser.add_argument("--loop-penalty", type=float, default=0.0, help="Penalty applied when repeating recent board states")
     parser.add_argument("--loop-window", type=int, default=0, help="Window size for detecting repeated board states (0 disables)")
     parser.add_argument("--progress-bonus", type=float, default=0.0, help="Bonus per newly filled cell to encourage forward progress")
+    parser.add_argument(
+        "--use-amp",
+        action="store_true",
+        help="Enable Automatic Mixed Precision (AMP) for faster training on modern GPUs (2-3x speedup on T4/A100)",
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=1,
+        help="Number of gradient accumulation steps (effective batch size = batch_size * N). Use >1 to simulate larger batches without extra VRAM",
+    )
+    parser.add_argument(
+        "--disable-tensorboard",
+        action="store_true",
+        help="Disable TensorBoard logging to save ~1-2GB RAM (CSV metrics still logged)",
+    )
 
     args = parser.parse_args(argv)
     device = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -232,6 +248,9 @@ def parse_args(argv: list[str] | None = None) -> DQNTrainingConfig:
         progress_bonus=args.progress_bonus,
         expert_buffer_size=args.expert_buffer_size,
         expert_sample_ratio=args.expert_sample_ratio,
+        use_amp=args.use_amp,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        use_tensorboard=not args.disable_tensorboard,
     )
 
 

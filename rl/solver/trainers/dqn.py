@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import optim
+from torch.cuda.amp import autocast, GradScaler
 
 from rl.env.env import FlowFreeEnv
 from rl.env.config import BoardShape, EnvConfig, DEFAULT_OBSERVATION, MaskConfig, RewardPreset
@@ -126,6 +127,9 @@ class DQNTrainingConfig:
     loop_penalty: float = 0.0
     loop_window: int = 0
     progress_bonus: float = 0.0
+    use_amp: bool = False  # Enable Automatic Mixed Precision (faster on modern GPUs)
+    gradient_accumulation_steps: int = 1  # Accumulate gradients over N steps (effective batch size = batch_size * N)
+    use_tensorboard: bool = True  # Enable TensorBoard logging (disable to save 1-2GB RAM)
 
 
 def epsilon_by_step(
@@ -413,7 +417,9 @@ def run_episode(
     reward_clamp: float | None = None,
     record_frames: list[str] | None = None,
     expert_buffer: ReplayBuffer | None = None,
-) -> tuple[float, int, bool, list[float], int, float, Counter[str], dict[str, float]]:
+    scaler: GradScaler | None = None,
+    accumulation_counter: int = 0,
+) -> tuple[float, int, bool, list[float], int, float, Counter[str], dict[str, float], int]:
     obs, _ = env.reset()
     if record_frames is not None:
         record_frames.append(env.board_string)
@@ -517,23 +523,48 @@ def run_episode(
                 if weights is not None:
                     expert_weights = np.ones(expert_batch_size, dtype=np.float64)
                     weights = np.concatenate([weights, expert_weights])
-            loss, td_errors = compute_td_loss(
-                policy_net,
-                target_net,
-                batch,
-                device=device,
-                gamma=cfg.gamma,
-                reward_scale=cfg.reward_scale,
-                reward_clamp=cfg.reward_clamp,
-                importance_weights=torch.tensor(weights, device=device) if weights is not None else None,
-            )
+            # Compute loss (with optional AMP)
+            with autocast(enabled=cfg.use_amp):
+                loss, td_errors = compute_td_loss(
+                    policy_net,
+                    target_net,
+                    batch,
+                    device=device,
+                    gamma=cfg.gamma,
+                    reward_scale=cfg.reward_scale,
+                    reward_clamp=cfg.reward_clamp,
+                    importance_weights=torch.tensor(weights, device=device) if weights is not None else None,
+                )
+
             if cfg.use_per and indices is not None:
                 buffer.update_priorities(indices, td_errors[: len(indices)].detach().cpu().numpy())
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(policy_net.parameters(), grad_clip)
-            optimizer.step()
+
+            # Scale loss for gradient accumulation
+            scaled_loss = loss / cfg.gradient_accumulation_steps
+
+            # Backward pass (with optional AMP scaling)
+            if scaler is not None:
+                scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
+
+            accumulation_counter += 1
+
+            # Update weights only after accumulating enough gradients
+            if accumulation_counter % cfg.gradient_accumulation_steps == 0:
+                if scaler is not None:
+                    # Unscale before gradient clipping
+                    scaler.unscale_(optimizer)
+                    if grad_clip is not None:
+                        torch.nn.utils.clip_grad_norm_(policy_net.parameters(), grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    if grad_clip is not None:
+                        torch.nn.utils.clip_grad_norm_(policy_net.parameters(), grad_clip)
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+
             losses.append(float(loss.item()))
 
         state, mask = next_state, next_mask
@@ -551,7 +582,7 @@ def run_episode(
         for transition in episode_transitions:
             expert_buffer.push_transition(transition)
 
-    return total_reward, steps, solved, losses, global_step + steps, constraint_penalty_total, constraint_counts, reward_breakdown
+    return total_reward, steps, solved, losses, global_step + steps, constraint_penalty_total, constraint_counts, reward_breakdown, accumulation_counter
 
 
 def evaluate_policy(
@@ -898,6 +929,13 @@ def run_training(
     target_net.eval()
 
     optimizer = optim.Adam(policy_net.parameters(), lr=cfg.lr)
+
+    # Initialize GradScaler for AMP (only if using CUDA and AMP is enabled)
+    scaler: GradScaler | None = None
+    if cfg.use_amp and device.type == "cuda":
+        scaler = GradScaler()
+        print(f"✓ Automatic Mixed Precision (AMP) enabled")
+
     buffer = ReplayBuffer(cfg.buffer_size, alpha=cfg.per_alpha, beta=cfg.per_beta, beta_increment=cfg.per_beta_increment)
     expert_buffer: ReplayBuffer | None = None
     if cfg.expert_buffer_size > 0 and cfg.expert_sample_ratio > 0:
@@ -911,13 +949,16 @@ def run_training(
     write_hyperparams(log_dir, cfg, puzzle_count=len(configs))
 
     # Initialize TensorBoard writer
-    try:
-        from torch.utils.tensorboard import SummaryWriter
-        tb_writer = SummaryWriter(log_dir=str(log_dir / "tensorboard"))
-        print(f"TensorBoard logging enabled: {log_dir / 'tensorboard'}")
-    except ImportError:
-        tb_writer = None
-        print("TensorBoard not available (torch.utils.tensorboard not found)")
+    tb_writer = None
+    if cfg.use_tensorboard:
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            tb_writer = SummaryWriter(log_dir=str(log_dir / "tensorboard"))
+            print(f"✓ TensorBoard logging enabled: {log_dir / 'tensorboard'}")
+        except ImportError:
+            print("⚠ TensorBoard not available (torch.utils.tensorboard not found)")
+    else:
+        print("✓ TensorBoard disabled")
     metrics_path = log_dir / "metrics.csv"
     with metrics_path.open("w", encoding="utf-8", newline="") as handle:
         handle.write(
@@ -1015,9 +1056,15 @@ def run_training(
         return choose_from_bucket(configs)
 
     global_step = 0
+    accumulation_counter = 0  # Track gradient accumulation across episodes
     best_train = 0.0
     best_validation: float | None = None
     best_primary = -1.0
+
+    # Print training configuration
+    if cfg.gradient_accumulation_steps > 1:
+        effective_batch = cfg.batch_size * cfg.gradient_accumulation_steps
+        print(f"✓ Gradient Accumulation enabled: {cfg.gradient_accumulation_steps} steps (effective batch={effective_batch})")
 
     try:
         for episode in range(1, cfg.episodes + 1):
@@ -1076,6 +1123,7 @@ def run_training(
                 constraint_penalty,
                 constraint_counts,
                 reward_breakdown,
+                accumulation_counter,
             ) = run_episode(
                 env,
                 policy_net,
@@ -1094,6 +1142,8 @@ def run_training(
                 reward_clamp=cfg.reward_clamp,
                 record_frames=record_frames,
                 expert_buffer=expert_buffer,
+                scaler=scaler,
+                accumulation_counter=accumulation_counter,
             )
 
             color_episode_counts[selected_config.color_count] += 1
