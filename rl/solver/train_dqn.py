@@ -51,6 +51,12 @@ def parse_args(argv: list[str] | None = None) -> DQNTrainingConfig:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", type=str, default=None, help="Training device (default: auto-detect)")
     parser.add_argument("--log-root", type=Path, default=Path("logs/dqn"))
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=None,
+        help="Explicit directory for this run (disables automatic timestamp subdirectory).",
+    )
     parser.add_argument("--output", type=Path, default=Path("models/rl_dqn.pt"))
     parser.add_argument("--puzzle-limit", type=int, default=None, help="Optional cap on puzzles loaded from CSV")
     parser.add_argument("--min-size", type=int, default=None, help="Smallest board size to include")
@@ -166,6 +172,7 @@ def parse_args(argv: list[str] | None = None) -> DQNTrainingConfig:
         seed=args.seed,
         device=device,
         log_root=args.log_root,
+        log_dir=args.log_dir,
         output=args.output,
         puzzle_limit=args.puzzle_limit,
         min_size=args.min_size,

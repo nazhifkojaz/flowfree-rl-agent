@@ -66,6 +66,7 @@ class DQNTrainingConfig:
     seed: int = 7
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     log_root: Path = Path("flowfree/logs/rl_training")
+    log_dir: Path | None = None
     output: Path = Path("models/rl_dqn.pt")
     puzzle_limit: int | None = None
     min_size: int | None = None
@@ -902,7 +903,11 @@ def run_training(
     if cfg.expert_buffer_size > 0 and cfg.expert_sample_ratio > 0:
         expert_buffer = ReplayBuffer(cfg.expert_buffer_size, alpha=0.0, beta=0.0, beta_increment=0.0)
 
-    log_dir = ensure_log_dir(cfg.log_root)
+    if cfg.log_dir is not None:
+        log_dir = Path(cfg.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        log_dir = ensure_log_dir(cfg.log_root)
     write_hyperparams(log_dir, cfg, puzzle_count=len(configs))
 
     # Initialize TensorBoard writer
