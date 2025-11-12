@@ -610,6 +610,8 @@ def evaluate_policy(
 
     for eval_idx in range(episodes):
         config = rng.choice(configs)
+        if cfg.steps_per_episode is not None:
+            config = replace(config, max_steps=cfg.steps_per_episode)
         env = build_env(cfg, config)
         obs, _ = env.reset(seed=rng.randrange(1_000_000))
         encoded = encode_observation(obs, device=device)
