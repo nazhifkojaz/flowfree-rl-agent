@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODEL_PATH="${1:-models/latest.pt}"
 ROLLOUT_MODE="${2:-both}"
-ROLLOUT_DIR="${3:-logs/dqn_full_pipeline_env2/manual_holdout_rollouts}"
+ROLLOUT_DIR="${3:-logs/manual_holdout_rollouts}"
 ROLLOUT_MAX="${4:-0}"
 ROLLOUT_GIF="${5:-false}"
 ROLLOUT_GIF_DURATION="${6:-140}"
@@ -12,7 +12,7 @@ LOOP_WINDOW="${8:-6}"
 PROGRESS_BONUS="${9:-0.02}"
 
 RUN_ID=$(basename "$MODEL_PATH" .pt)
-OUT_DIR="logs/dqn_full_pipeline_env2/manual_holdout"
+OUT_DIR="logs/manual_holdout"
 OUT_CSV="$OUT_DIR/holdout_${RUN_ID}.csv"
 mkdir -p "$OUT_DIR"
 

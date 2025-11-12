@@ -68,10 +68,14 @@ STEPS_PER_EPISODE=""
 EXPERT_BUFFER_SIZE=5000
 EXPERT_SAMPLE_RATIO=0.25
 HOLDOUT_ROLLOUT_MODE="both"
-HOLDOUT_ROLLOUT_DIR="logs/dqn_full_pipeline_env2/holdout_rollouts"
 HOLDOUT_GIF=true
 HOLDOUT_GIF_DURATION=140
 HOLDOUT_ROLLOUT_MAX=0
+
+
+LOG_DIR="logs"
+RUN_DIR="${LOG_DIR}/${RUN_ID}"
+HOLDOUT_ROLLOUT_DIR="${RUN_DIR}/holdout_rollouts"
 
 # If no explicit step cap provided, default to 2 * board area
 if [ -z "$STEPS_PER_EPISODE" ]; then
@@ -98,7 +102,7 @@ Usage: $0 [options]
   --skip-supervised      Skip supervised warm start
   --simple-rewards       Use potential-based reward preset
   --quick                Fast settings (50 episodes, fewer epochs)
-  --episodes N           Override episode count (default: 5000)
+  --episodes N           Override episode count (default: 4000)
   --batch-size N         Override DQN batch size (default: 64)
   --buffer-size N        Override replay buffer size (default: 80000)
   --trace-limit N        Limit number of traces generated (default: 3000)
@@ -110,8 +114,8 @@ Usage: $0 [options]
   --solve-bonus VAL      Solve reward bonus (default: 20.0)
   --constraint-free-bonus VAL  Bonus when no constraints are violated (default: 5.0)
   --penalty-warmup N     Episodes over which to ramp constraint penalties (default: 600)
-  --disconnect-penalty VAL  Disconnect penalty (default: -0.20)
-  --degree-penalty VAL      Degree penalty (default: -0.25)
+  --disconnect-penalty VAL  Disconnect penalty (default: -0.06)
+  --degree-penalty VAL      Degree penalty (default: -0.08)
   --invalid-penalty VAL     Invalid move penalty (default: -0.3)
   --undo-penalty VAL        Undo action penalty (default: -0.1)
   --complete-sustain-bonus VAL  Sustain bonus per completed colour (default: 0.1)
@@ -151,7 +155,7 @@ while [[ $# -gt 0 ]]; do
         --simple-rewards) USE_SIMPLE_REWARDS=true ;;
         --quick)
             QUICK_MODE=true
-            EPISODES=50
+            EPISODES=10
             EVAL_INTERVAL=10
             SUPERVISED_EPOCHS=2
             TRACE_LIMIT=100
@@ -342,7 +346,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║          Full DQN Training Pipeline (Env2 Backend)          ║${NC}"
+echo -e "${BLUE}║          Full DQN Training Pipeline (Env2 Backend)         ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo "Configuration:"
@@ -446,7 +450,6 @@ if [ "$SKIP_SUPERVISED" = false ]; then
 else
     echo -e "${YELLOW}Skipping supervised warm-start (--skip-supervised)${NC}"
 fi
-echo ""
 
 ################################################################################
 # Step 4: DQN (Env2)
@@ -454,8 +457,8 @@ echo ""
 echo -e "${CYAN}Step 4/5: DQN training (env2 backend)${NC}"
 
 mkdir -p models
+mkdir -p "$RUN_DIR"
 DQN_MODEL="models/${RUN_ID}.pt"
-LOG_DIR="logs/dqn_full_pipeline_env2"
 
 # Build env2 channel args
 ENV2_CHANNEL_ARGS=()
@@ -482,6 +485,7 @@ DQN_CMD=(python rl/solver/train_dqn.py
     --log-every "$LOG_EVERY"
     --output "$DQN_MODEL"
     --log-root "$LOG_DIR"
+    --log-dir "$RUN_DIR"
     --seed "$SEED"
     --env-backend env2
     --env2-reward "$ENV2_REWARD"
@@ -552,7 +556,7 @@ echo ""
 ################################################################################
 echo -e "${CYAN}Step 5/5: Hold-out evaluation (env2)${NC}"
 
-HOLDOUT_CSV="$LOG_DIR/holdout_eval_${RUN_ID}.csv"
+HOLDOUT_CSV="$RUN_DIR/holdout_eval_${RUN_ID}.csv"
 
 if [ ! -f "data/dqn_test.csv" ]; then
     echo -e "${YELLOW}No test split found. Skipping evaluation.${NC}"
@@ -591,7 +595,7 @@ else
         --loop-window "$LOOP_WINDOW"
         --progress-bonus "$PROGRESS_BONUS"
         --rollout-mode "$HOLDOUT_ROLLOUT_MODE"
-        --rollout-dir "$HOLDOUT_ROLLOUT_DIR/$RUN_ID"
+        --rollout-dir "$HOLDOUT_ROLLOUT_DIR"
         --rollout-max "$HOLDOUT_ROLLOUT_MAX"
         --gif-duration "$HOLDOUT_GIF_DURATION"
         --rollout-tag "$RUN_ID"
@@ -615,15 +619,10 @@ else
     fi
 
     # Run evaluation
-    "${EVAL_CMD[@]}" | tee "$LOG_DIR/test_results.txt"
-fi
-
-if [ -f "$HOLDOUT_CSV" ]; then
-    cp "$HOLDOUT_CSV" "$LOG_DIR/holdout_eval_metrics.csv"
+    "${EVAL_CMD[@]}" | tee "$RUN_DIR/test_results.txt"
 fi
 
 echo -e "${GREEN}✓ Pipeline complete${NC}"
-echo ""
 
 ################################################################################
 # Summary
@@ -634,9 +633,9 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 echo "Run ID: $RUN_ID"
 echo "Model: $DQN_MODEL"
-echo "Logs:  $LOG_DIR"
+echo "Logs:  $RUN_DIR"
 echo "Holdout metrics: $HOLDOUT_CSV"
-echo "Holdout rollouts (mode: $HOLDOUT_ROLLOUT_MODE): $HOLDOUT_ROLLOUT_DIR/$RUN_ID"
-echo "MLflow: cd $LOG_DIR && mlflow ui --backend-store-uri file://./mlruns --port 5000"
-echo "Test results: $LOG_DIR/test_results.txt"
+echo "Holdout rollouts (mode: $HOLDOUT_ROLLOUT_MODE): $HOLDOUT_ROLLOUT_DIR"
+echo "MLflow: cd $RUN_DIR && mlflow ui --backend-store-uri file://./mlruns --port 5000"
+echo "Test results: $RUN_DIR/test_results.txt"
 echo ""
