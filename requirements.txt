@@ -1,0 +1,7 @@
+numpy
+pandas
+torch>=2.2
+mlflow
+tensorboard
+matplotlib
+tqdm

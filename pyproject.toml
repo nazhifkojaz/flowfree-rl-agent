@@ -1,0 +1,29 @@
+[project]
+name = "flowfree-rl-agent"
+version = "0.1.0"
+description = "Reinforcement learning agents for FlowFree puzzles"
+authors = [{name = "FlowFree RL Team"}]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "torch>=2.2",
+    "mlflow",
+    "tensorboard",
+    "matplotlib",
+    "tqdm"
+]
+
+[project.optional-dependencies]
+rl = ["tensorboard", "mlflow"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["rl"]
+
+[tool.uv]
+package = true

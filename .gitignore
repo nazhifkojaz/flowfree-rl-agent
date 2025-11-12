@@ -1,0 +1,38 @@
+__pycache__/
+*.pyc
+logs/
+.DS_Store
+.env
+.venv
+
+# Training artifacts
+data/
+models/
+*.pt
+*.pth
+
+# Temporary files
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+Thumbs.db
+
+# Python
+*.egg-info/
+dist/
+build/
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Documentation build
+docs/_build/
