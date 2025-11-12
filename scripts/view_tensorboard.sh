@@ -11,7 +11,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Default to full pipeline logs
-LOG_DIR="${1:-logs/dqn_full_pipeline/tensorboard}"
+LOG_DIR="${1:-logs/dqn_full_pipeline_env2/tensorboard}"
 PORT="${2:-6006}"
 
 # Check if TensorBoard directory exists

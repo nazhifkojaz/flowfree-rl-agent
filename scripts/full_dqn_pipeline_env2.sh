@@ -67,6 +67,9 @@ PROGRESS_BONUS=0.02
 STEPS_PER_EPISODE=""
 EXPERT_BUFFER_SIZE=5000
 EXPERT_SAMPLE_RATIO=0.25
+USE_AMP=false
+GRADIENT_ACCUMULATION_STEPS=1
+DISABLE_TENSORBOARD=false
 HOLDOUT_ROLLOUT_MODE="both"
 HOLDOUT_GIF=true
 HOLDOUT_GIF_DURATION=140
@@ -144,6 +147,9 @@ Usage: $0 [options]
   --holdout-gif-duration MS       GIF frame duration (default: 140)
   --expert-buffer-size N      Size of expert replay buffer (default: 0 = disabled)
   --expert-sample-ratio VAL   Fraction of batch sampled from expert buffer (default: 0.0)
+  --use-amp                   Enable Automatic Mixed Precision (2-3x faster on T4/A100, default: false)
+  --gradient-accumulation-steps N  Number of gradient accumulation steps (effective batch = batch * N, default: 1)
+  --disable-tensorboard       Disable TensorBoard logging to save ~1-2GB RAM (CSV metrics still logged, default: false)
 EOF
 }
 
@@ -282,6 +288,16 @@ while [[ $# -gt 0 ]]; do
         --expert-sample-ratio)
             EXPERT_SAMPLE_RATIO="$2"
             shift
+            ;;
+        --use-amp)
+            USE_AMP=true
+            ;;
+        --gradient-accumulation-steps)
+            GRADIENT_ACCUMULATION_STEPS="$2"
+            shift
+            ;;
+        --disable-tensorboard)
+            DISABLE_TENSORBOARD=true
             ;;
         --unsolved-penalty)
             UNSOLVED_PENALTY="$2"
@@ -524,16 +540,29 @@ DQN_CMD=(python rl/solver/train_dqn.py
     --curriculum-six-prob-start "$CURRICULUM_SIX_START"
     --curriculum-six-prob-end "$CURRICULUM_SIX_END"
     --curriculum-six-prob-episodes "$CURRICULUM_SIX_EPISODES"
+    --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS"
 )
 
 if [ "${#ENV2_CHANNEL_ARGS[@]}" -gt 0 ]; then
     DQN_CMD+=("${ENV2_CHANNEL_ARGS[@]}")
 fi
+
 if [ "${#EPS_LINEAR_ARGS[@]}" -gt 0 ]; then
     DQN_CMD+=("${EPS_LINEAR_ARGS[@]}")
 fi
+
 if [ -n "$STEPS_PER_EPISODE" ]; then
     DQN_CMD+=(--steps-per-episode "$STEPS_PER_EPISODE")
+fi
+
+if [ "$USE_AMP" = true ]; then
+    DQN_CMD+=(--use-amp)
+    echo -e "${GREEN}AMP enabled: 2-3x speedup on modern GPUs${NC}"
+fi
+
+if [ "$DISABLE_TENSORBOARD" = true ]; then
+    DQN_CMD+=(--disable-tensorboard)
+    echo -e "${GREEN}TensorBoard disabled${NC}"
 fi
 
 if [ "$SKIP_SUPERVISED" = false ] && [ -f "$SUPERVISED_MODEL" ]; then
