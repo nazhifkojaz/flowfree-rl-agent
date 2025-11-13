@@ -56,10 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--move-penalty", type=float, default=-0.05, help="Move penalty")
     parser.add_argument("--distance-bonus", type=float, default=0.35, help="Distance bonus scale")
     parser.add_argument("--complete-bonus", type=float, default=1.8, help="Color completion bonus")
-    parser.add_argument("--complete-sustain-bonus", type=float, default=0.1, help="Sustain bonus per completed color")
-    parser.add_argument("--complete-revert-penalty", type=float, default=2.0, help="Penalty when undo reopens color")
+    parser.add_argument("--complete-sustain-bonus", type=float, default=0.0, help="Sustain bonus per completed color (DISABLED by default)")
+    parser.add_argument("--complete-revert-penalty", type=float, default=0.0, help="Penalty when undo reopens color (DISABLED by default)")
     parser.add_argument("--solve-bonus", type=float, default=35.0, help="Solve bonus")
-    parser.add_argument("--constraint-free-bonus", type=float, default=5.0, help="Constraint-free bonus")
+    parser.add_argument("--solve-efficiency-bonus", type=float, default=0.5, help="Bonus per step remaining when solved")
+    parser.add_argument("--constraint-free-bonus", type=float, default=0.0, help="Constraint-free bonus (DISABLED by default)")
     parser.add_argument("--unsolved-penalty", type=float, default=-2.0, help="Unsolved penalty")
     parser.add_argument("--unsolved-penalty-start", type=float, default=0.0, help="Starting unsolved penalty")
     parser.add_argument("--unsolved-penalty-warmup", type=int, default=500, help="Unsolved penalty warmup episodes")
@@ -152,6 +153,7 @@ def main() -> None:
         complete_sustain_bonus=args.complete_sustain_bonus,
         complete_revert_penalty=args.complete_revert_penalty,
         solve_bonus=args.solve_bonus,
+        solve_efficiency_bonus=args.solve_efficiency_bonus,
         constraint_free_bonus=args.constraint_free_bonus,
         unsolved_penalty=args.unsolved_penalty,
         unsolved_penalty_start=args.unsolved_penalty_start,

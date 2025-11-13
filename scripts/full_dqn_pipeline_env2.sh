@@ -28,7 +28,7 @@ cd "$PROJECT_ROOT"
 # Defaults (tune as needed)
 RUN_ID="dqn_$(date +%Y%m%d-%H%M%S)"
 EPISODES=4000
-BATCH_SIZE=64
+BATCH_SIZE=192
 BUFFER_SIZE=80000
 TRACE_LIMIT=3000
 MIN_SIZE=5
@@ -40,35 +40,36 @@ EVAL_EPISODES=20
 LOG_EVERY=25
 ENV2_CHANNELS=("occupancy" "endpoints" "heads" "free" "congestion" "distance")
 ENV2_REWARD="potential"
-COMPLETE_BONUS=1.8
-SOLVE_BONUS=35.0
+COMPLETE_BONUS=2.0
+SOLVE_BONUS=40.0
+SOLVE_EFFICIENCY_BONUS=0.6
 EPSILON_START=1.0
 EPSILON_END=0.10
 EPSILON_DECAY=20000
-CONSTRAINT_FREE_BONUS=5.0
-PENALTY_WARMUP=600
+CONSTRAINT_FREE_BONUS=0.0  # DISABLED
+PENALTY_WARMUP=800
 DISCONNECT_PENALTY=-0.06
 DEGREE_PENALTY=-0.08
 INVALID_PENALTY=-0.3
-COMPLETE_SUSTAIN_BONUS=0.1
-COMPLETE_REVERT_PENALTY=2.0
-UNDO_PENALTY=-0.10
+COMPLETE_SUSTAIN_BONUS=0.0  # DISABLED
+COMPLETE_REVERT_PENALTY=0.0  # DISABLED (was 2.0)
+UNDO_PENALTY=-0.12
 EPSILON_SCHEDULE="linear"
 EPSILON_LINEAR_STEPS="4000"
-UNSOLVED_PENALTY=-2.0
+UNSOLVED_PENALTY=-4.0
 UNSOLVED_PENALTY_START=0.0
 UNSOLVED_PENALTY_WARMUP=500
 CURRICULUM_SIX_START=0.0
 CURRICULUM_SIX_END=0.0
 CURRICULUM_SIX_EPISODES=0
-LOOP_PENALTY=-2.0
-LOOP_WINDOW=10
-PROGRESS_BONUS=0.02
+LOOP_PENALTY=-1.8
+LOOP_WINDOW=6
+PROGRESS_BONUS=0.015
 STEPS_PER_EPISODE=""
 EXPERT_BUFFER_SIZE=5000
-EXPERT_SAMPLE_RATIO=0.25
-USE_AMP=false
-GRADIENT_ACCUMULATION_STEPS=1
+EXPERT_SAMPLE_RATIO=0.20
+USE_AMP=true
+GRADIENT_ACCUMULATION_STEPS=2
 DISABLE_TENSORBOARD=false
 HOLDOUT_ROLLOUT_MODE="both"
 HOLDOUT_GIF=true
@@ -120,9 +121,10 @@ Usage: $0 [options]
   --supervised-lr LR     Override supervised learning rate (default: 1e-4)
   --epsilon-start VAL    Starting epsilon for DQN (default: 1.0)
   --epsilon-end VAL      Ending epsilon for DQN (default: 0.10)
-  --complete-bonus VAL   Completion reward bonus (default: 5.0)
-  --solve-bonus VAL      Solve reward bonus (default: 20.0)
-  --constraint-free-bonus VAL  Bonus when no constraints are violated (default: 5.0)
+  --complete-bonus VAL   Completion reward bonus (default: 1.8)
+  --solve-bonus VAL      Solve reward bonus (default: 35.0)
+  --solve-efficiency-bonus VAL  Bonus per step remaining when solved (default: 0.5)
+  --constraint-free-bonus VAL  Bonus when no constraints are violated (default: 0.0, DISABLED)
   --penalty-warmup N     Episodes over which to ramp constraint penalties (default: 600)
   --disconnect-penalty VAL  Disconnect penalty (default: -0.06)
   --degree-penalty VAL      Degree penalty (default: -0.08)
@@ -256,6 +258,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --solve-bonus)
             SOLVE_BONUS="$2"
+            shift
+            ;;
+        --solve-efficiency-bonus)
+            SOLVE_EFFICIENCY_BONUS="$2"
             shift
             ;;
         --constraint-free-bonus)
@@ -573,6 +579,7 @@ DQN_CMD=(python rl/solver/train_dqn.py
     --complete-sustain-bonus "$COMPLETE_SUSTAIN_BONUS"
     --complete-revert-penalty "$COMPLETE_REVERT_PENALTY"
     --solve-bonus "$SOLVE_BONUS"
+    --solve-efficiency-bonus "$SOLVE_EFFICIENCY_BONUS"
     --constraint-free-bonus "$CONSTRAINT_FREE_BONUS"
     --penalty-warmup "$PENALTY_WARMUP"
     --loop-penalty "$LOOP_PENALTY"
@@ -653,6 +660,7 @@ else
         --complete-sustain-bonus "$COMPLETE_SUSTAIN_BONUS"
         --complete-revert-penalty "$COMPLETE_REVERT_PENALTY"
         --solve-bonus "$SOLVE_BONUS"
+        --solve-efficiency-bonus "$SOLVE_EFFICIENCY_BONUS"
         --constraint-free-bonus "$CONSTRAINT_FREE_BONUS"
         --unsolved-penalty "$UNSOLVED_PENALTY"
         --unsolved-penalty-start "$UNSOLVED_PENALTY_START"

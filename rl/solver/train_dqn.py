@@ -10,15 +10,13 @@ from rl.solver.trainers.dqn import (
     DQNTrainingConfig,
     collect_policy_rollout,
     compute_td_loss,
-    ensure_log_dir,
+    epsilon_by_step,
     evaluate_policy,
     load_puzzle_configs,
     run_episode,
     run_training,
     save_rollout_frames,
     select_action,
-    write_hyperparams,
-    epsilon_by_step,
 )
 
 
@@ -91,7 +89,8 @@ def parse_args(argv: list[str] | None = None) -> DQNTrainingConfig:
         help="Penalty applied when undoing a previously completed colour (env2 only).",
     )
     parser.add_argument("--solve-bonus", type=float, default=25.0)
-    parser.add_argument("--constraint-free-bonus", type=float, default=5.0)
+    parser.add_argument("--solve-efficiency-bonus", type=float, default=0.5, help="Bonus per step remaining when solved (encourages efficiency)")
+    parser.add_argument("--constraint-free-bonus", type=float, default=0.0, help="DISABLED by default (redundant)")
     parser.add_argument("--eval-epsilon", type=float, default=0.0)
     parser.add_argument("--segment-connection-bonus", type=float, default=0.0)
     parser.add_argument("--path-extension-bonus", type=float, default=0.0)
@@ -213,6 +212,7 @@ def parse_args(argv: list[str] | None = None) -> DQNTrainingConfig:
         complete_sustain_bonus=args.complete_sustain_bonus,
         complete_revert_penalty=args.complete_revert_penalty,
         solve_bonus=args.solve_bonus,
+        solve_efficiency_bonus=args.solve_efficiency_bonus,
         constraint_free_bonus=args.constraint_free_bonus,
         eval_epsilon=args.eval_epsilon,
         segment_connection_bonus=args.segment_connection_bonus,
@@ -284,8 +284,6 @@ __all__ = [
     "evaluate_policy",
     "collect_policy_rollout",
     "save_rollout_frames",
-    "ensure_log_dir",
-    "write_hyperparams",
     "run_training",
     "parse_args",
     "main",

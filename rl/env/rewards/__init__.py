@@ -16,6 +16,7 @@ class RewardSystem:
     invalid_penalty: float
     unsolved_penalty: float
     undo_penalty: float
+    solve_efficiency_bonus: float = 0.0  # Bonus per step remaining when solved
 
 
 def build_reward_system(preset: RewardPreset) -> RewardSystem:
@@ -24,6 +25,7 @@ def build_reward_system(preset: RewardPreset) -> RewardSystem:
     invalid_penalty = params.get("invalid_penalty", 0.0)
     unsolved_penalty = params.get("unsolved_penalty", 0.0)
     undo_penalty = params.get("undo_penalty", 0.0)
+    solve_efficiency_bonus = params.get("solve_efficiency_bonus", 0.0)
 
     for component in preset.components:
         if component == "potential":
@@ -58,6 +60,7 @@ def build_reward_system(preset: RewardPreset) -> RewardSystem:
         invalid_penalty=invalid_penalty,
         unsolved_penalty=unsolved_penalty,
         undo_penalty=undo_penalty,
+        solve_efficiency_bonus=solve_efficiency_bonus,
     )
 
 

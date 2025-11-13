@@ -101,9 +101,18 @@ class FlowFreeEnv:
                 reward += self._reward_system.undo_penalty
                 breakdown["undo"] = breakdown.get("undo", 0.0) + self._reward_system.undo_penalty
 
+            # Apply unsolved penalty if truncated without solving
             if truncated and self._reward_system.unsolved_penalty and not terminated:
                 reward += self._reward_system.unsolved_penalty
                 breakdown["unsolved"] = breakdown.get("unsolved", 0.0) + self._reward_system.unsolved_penalty
+
+            # Apply efficiency bonus if solved (rewards solving with fewer steps)
+            if terminated and self._reward_system.solve_efficiency_bonus:
+                max_steps = self.config.effective_max_steps
+                steps_remaining = max(0, max_steps - next_state.steps)
+                efficiency_reward = steps_remaining * self._reward_system.solve_efficiency_bonus
+                reward += efficiency_reward
+                breakdown["solve_efficiency"] = efficiency_reward
 
             diff = outcome.diff
 
