@@ -1,15 +1,26 @@
+"""DQN training utilities and legacy configuration.
+
+Post-refactor organization:
+- This file now contains SHARED UTILITIES used by the new DQNTrainer
+- Core functions (run_episode, evaluate_policy, etc.) are still here
+- DQNTrainingConfig is DEPRECATED - use new modular configs instead
+- For new code, use: rl.solver.trainers.dqn_trainer.DQNTrainer
+
+Maintained for backward compatibility with existing scripts.
+"""
+
 from __future__ import annotations
 
 import csv
 import json
 import math
 import random
-import time
-from collections import Counter, defaultdict, deque
+import warnings
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 import numpy as np
 import torch
@@ -17,16 +28,23 @@ import torch.nn.functional as F
 from torch import optim
 from torch.cuda.amp import autocast, GradScaler
 
+from rl.env.config import (
+    BoardShape,
+    EnvConfig,
+    DEFAULT_OBSERVATION,
+    MaskConfig,
+    ObservationSpec,
+    RewardPreset,
+    default_max_steps,
+)
 from rl.env.env import FlowFreeEnv
-from rl.env.config import BoardShape, EnvConfig, DEFAULT_OBSERVATION, MaskConfig, RewardPreset
-from rl.env.config import BoardShape, EnvConfig, DEFAULT_OBSERVATION, MaskConfig, ObservationSpec, RewardPreset, default_max_steps
-from rl.solver.reward_settings import RewardSettings
 from rl.solver.constants import MAX_CHANNELS
+from rl.solver.core import NullRunLogger, RunLogger
 from rl.solver.data import ReplayBuffer, Transition
 from rl.solver.observation import EncodedObservation, encode_observation, mask_to_tensor
-from rl.solver.policies.q_network import FlowQNetwork
 from rl.solver.policies.policy import FlowPolicy, load_policy
-from rl.solver.core import NullRunLogger, RunLogger, RunPaths
+from rl.solver.policies.q_network import FlowQNetwork
+from rl.solver.reward_settings import RewardSettings
 
 
 def _infer_color_count(head_mask: torch.Tensor) -> int:
@@ -50,6 +68,22 @@ class PuzzleConfig:
 
 @dataclass
 class DQNTrainingConfig:
+    """DEPRECATED: Monolithic DQN training configuration.
+
+    This configuration is maintained for backward compatibility only.
+    For new code, use the modular configuration classes:
+        - rl.solver.trainers.config.TrainingConfig (core hyperparameters)
+        - rl.solver.trainers.config.EvaluationConfig (evaluation settings)
+        - rl.solver.trainers.config.CurriculumConfig (curriculum learning)
+        - rl.solver.trainers.config.RolloutConfig (rollout recording)
+        - rl.solver.reward_settings.RewardSettings (reward shaping)
+
+    And use the DQNTrainer class directly:
+        from rl.solver.trainers.dqn_trainer import DQNTrainer
+
+    This config will be removed in a future version.
+    """
+
     puzzle_csv: Path
     episodes: int = 500
     batch_size: int = 64
@@ -89,10 +123,11 @@ class DQNTrainingConfig:
     disconnect_penalty: float = -0.08
     degree_penalty: float = -0.08
     complete_color_bonus: float = 3.0
-    complete_sustain_bonus: float = 0.0
-    complete_revert_penalty: float | None = None
+    complete_sustain_bonus: float = 0.0  # DISABLED: Overcomplicated
+    complete_revert_penalty: float | None = None  # DISABLED: Overcomplicated
     solve_bonus: float = 20.0
-    constraint_free_bonus: float = 5.0
+    constraint_free_bonus: float = 0.0  # DISABLED: Redundant with constraint penalties
+    solve_efficiency_bonus: float = 0.5  # NEW: Bonus per step remaining when solved
     eval_epsilon: float = 0.0
     segment_connection_bonus: float = 0.0
     path_extension_bonus: float = 0.0
@@ -118,7 +153,7 @@ class DQNTrainingConfig:
     use_per: bool = True
     use_dueling: bool = False
     simple_rewards: bool = False  # Use simplified reward structure
-    env_backend: str = "legacy"
+    env_backend: str = "env2"  # Only env2 is supported
     env2_reward: str = "potential"
     env2_channels: tuple[str, ...] | None = None
     env2_undo_penalty: float = -0.1
@@ -130,6 +165,16 @@ class DQNTrainingConfig:
     use_amp: bool = False  # Enable Automatic Mixed Precision (faster on modern GPUs)
     gradient_accumulation_steps: int = 1  # Accumulate gradients over N steps (effective batch size = batch_size * N)
     use_tensorboard: bool = True  # Enable TensorBoard logging (disable to save 1-2GB RAM)
+
+    def __post_init__(self):
+        """Emit deprecation warning when config is instantiated."""
+        warnings.warn(
+            "DQNTrainingConfig is deprecated and will be removed in a future version. "
+            "Please use the modular config classes (TrainingConfig, EvaluationConfig, etc.) "
+            "and DQNTrainer class instead. See rl/solver/trainers/dqn_trainer.py for examples.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 def epsilon_by_step(
@@ -333,6 +378,7 @@ def _build_env2_reward(cfg: "DQNTrainingConfig", puzzle_config: PuzzleConfig):
         "distance_scale": reward.distance_bonus,
         "complete_bonus": reward.complete_color_bonus,
         "solve_bonus": reward.solve_bonus,
+        "solve_efficiency_bonus": cfg.solve_efficiency_bonus,
         "invalid_penalty": cfg.invalid_penalty,
         "dead_pocket_penalty": reward.dead_pocket_penalty,
         "disconnect_penalty": reward.disconnect_penalty,
@@ -828,561 +874,33 @@ def save_rollout_frames(
     return jsonl_path, gif_path, meta_path
 
 
-def ensure_log_dir(log_root: Path) -> Path:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    log_dir = log_root / f"dqn_{timestamp}"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return log_dir
-
-
-def write_hyperparams(log_dir: Path, config: DQNTrainingConfig, puzzle_count: int) -> None:
-    payload = {
-        key: (str(value) if isinstance(value, Path) else value)
-        for key, value in asdict(config).items()
-    }
-    payload["puzzle_count"] = puzzle_count
-    path = log_dir / "hyperparams.json"
-    path.write_text(json.dumps(payload, indent=2))
-
-
 def run_training(
     cfg: DQNTrainingConfig,
     *,
     logger: RunLogger | None = None,
     eval_callback: Callable[[int, float, float], None] | None = None,
 ) -> tuple[Path, float, float | None]:
-    torch.manual_seed(cfg.seed)
-    random.seed(cfg.seed)
-    np.random.seed(cfg.seed)
+    """Run DQN training (backward compatibility wrapper).
 
-    logger = logger or NullRunLogger()
+    This function now uses the refactored DQNTrainer class internally.
+    All functionality is preserved while reducing code duplication.
 
-    # Use simplified rewards if flag is set
-    if cfg.simple_rewards:
-        from rl.solver.reward_settings import get_simple_reward_settings
+    Args:
+        cfg: DQN training configuration
+        logger: Optional MLflow logger
+        eval_callback: Optional callback(episode, success_rate, avg_reward)
 
-        reward_cfg = get_simple_reward_settings()
-        print("Using simplified reward configuration (potential-based only)")
-    else:
-        reward_cfg = RewardSettings(
-            move_penalty=cfg.move_penalty,
-            distance_bonus=cfg.distance_bonus,
-            invalid_penalty=cfg.invalid_penalty,
-            distance_penalty=getattr(cfg, "distance_penalty", 0.0),
-            cell_fill_bonus=getattr(cfg, "cell_fill_bonus", 0.0),
-            color_switch_penalty=getattr(cfg, "color_switch_penalty", 0.0),
-            streak_bonus_per_move=getattr(cfg, "streak_bonus_per_move", 0.0),
-            streak_length=getattr(cfg, "streak_length", 2),
-            unsolved_penalty=cfg.unsolved_penalty,
-            complete_color_bonus=cfg.complete_color_bonus,
-            solve_bonus=cfg.solve_bonus,
-            dead_pocket_penalty=cfg.dead_pocket_penalty,
-            disconnect_penalty=cfg.disconnect_penalty,
-            degree_penalty=cfg.degree_penalty,
-            segment_connection_bonus=cfg.segment_connection_bonus,
-            path_extension_bonus=cfg.path_extension_bonus,
-            move_reduction_bonus=cfg.move_reduction_bonus,
-            dead_end_penalty=cfg.dead_end_penalty,
-        )
-    configs = load_puzzle_configs(
-        cfg.puzzle_csv,
-        limit=cfg.puzzle_limit,
-        min_size=cfg.min_size,
-        max_size=cfg.max_size,
-        max_colors=cfg.max_colors,
-        reward_cfg=reward_cfg,
-        seed=cfg.seed,
-    )
-    if not configs:
-        logger.close()
-        raise SystemExit("No puzzles available for training. Check CSV filters.")
+    Returns:
+        Tuple of (output_path, best_train_success, best_validation_success)
+    """
+    from rl.solver.trainers.dqn_compat import run_training_with_new_trainer
 
-    params = {
-        key: (str(value) if isinstance(value, Path) else value)
-        for key, value in asdict(cfg).items()
-    }
-    params["puzzle_count"] = len(configs)
-    validation_configs: list[PuzzleConfig] = []
-    if cfg.validation_csv is not None:
-        validation_configs = load_puzzle_configs(
-            cfg.validation_csv,
-            limit=cfg.validation_limit,
-            min_size=cfg.min_size,
-            max_size=cfg.max_size,
-            max_colors=cfg.max_colors,
-            reward_cfg=reward_cfg,
-            seed=cfg.seed + 131,
-        )
-        params["validation_count"] = len(validation_configs)
-    logger.log_params(params)
-    logger.set_tags({"phase": "dqn_finetune"})
+    return run_training_with_new_trainer(cfg, logger=logger, eval_callback=eval_callback)
 
-    device = torch.device(cfg.device)
-    policy_net = FlowQNetwork(in_channels=MAX_CHANNELS, use_dueling=cfg.use_dueling).to(device)
-    if cfg.policy_init is not None:
-        if not cfg.policy_init.exists():
-            raise SystemExit(f"Policy init checkpoint not found: {cfg.policy_init}")
-        supervised_policy = FlowPolicy(in_channels=MAX_CHANNELS)
-        load_policy(supervised_policy, cfg.policy_init, map_location=device)
-        policy_net.backbone.load_state_dict(supervised_policy.backbone.state_dict(), strict=False)
-        print(f"Loaded supervised backbone weights from {cfg.policy_init}")
-    target_net = FlowQNetwork(in_channels=MAX_CHANNELS, use_dueling=cfg.use_dueling).to(device)
-    target_net.load_state_dict(policy_net.state_dict())
-    target_net.eval()
-
-    optimizer = optim.Adam(policy_net.parameters(), lr=cfg.lr)
-
-    # Initialize GradScaler for AMP (only if using CUDA and AMP is enabled)
-    scaler: GradScaler | None = None
-    if cfg.use_amp and device.type == "cuda":
-        scaler = GradScaler()
-        print(f"✓ Automatic Mixed Precision (AMP) enabled")
-
-    buffer = ReplayBuffer(cfg.buffer_size, alpha=cfg.per_alpha, beta=cfg.per_beta, beta_increment=cfg.per_beta_increment)
-    expert_buffer: ReplayBuffer | None = None
-    if cfg.expert_buffer_size > 0 and cfg.expert_sample_ratio > 0:
-        expert_buffer = ReplayBuffer(cfg.expert_buffer_size, alpha=0.0, beta=0.0, beta_increment=0.0)
-
-    if cfg.log_dir is not None:
-        log_dir = Path(cfg.log_dir)
-        log_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        log_dir = ensure_log_dir(cfg.log_root)
-    write_hyperparams(log_dir, cfg, puzzle_count=len(configs))
-
-    # Initialize TensorBoard writer
-    tb_writer = None
-    if cfg.use_tensorboard:
-        try:
-            from torch.utils.tensorboard import SummaryWriter
-            tb_writer = SummaryWriter(log_dir=str(log_dir / "tensorboard"))
-            print(f"✓ TensorBoard logging enabled: {log_dir / 'tensorboard'}")
-        except ImportError:
-            print("⚠ TensorBoard not available (torch.utils.tensorboard not found)")
-    else:
-        print("✓ TensorBoard disabled")
-    metrics_path = log_dir / "metrics.csv"
-    with metrics_path.open("w", encoding="utf-8", newline="") as handle:
-        handle.write(
-            "episode,total_reward,steps,epsilon,avg_loss,solved,constraint_penalty,constraint_dead_pocket,"
-            "constraint_disconnect,constraint_degree,eval_success,eval_reward,val_success,val_reward,board_size,"
-            "color_count,reward_breakdown\n"
-        )
-    rollout_root: Path | None = None
-    rollouts_recorded = 0
-    if cfg.record_rollouts:
-        rollout_root = cfg.rollout_dir / log_dir.name
-        rollout_root.mkdir(parents=True, exist_ok=True)
-    summary_path = log_dir / "metrics_summary.csv"
-    with summary_path.open("w", encoding="utf-8", newline="") as handle:
-        handle.write("episode,rolling_reward_100,rolling_success_100,rolling_constraint_penalty_100\n")
-    reward_window: deque[float] = deque(maxlen=100)
-    success_window: deque[int] = deque(maxlen=100)
-    constraint_window: deque[float] = deque(maxlen=100)
-
-    size_buckets: dict[int, list[PuzzleConfig]] = defaultdict(list)
-    color_buckets: dict[int, list[PuzzleConfig]] = defaultdict(list)
-    for cfg_item in configs:
-        size_buckets[cfg_item.width].append(cfg_item)
-        color_buckets[cfg_item.color_count].append(cfg_item)
-    color_episode_counts: Counter[int] = Counter()
-    color_success_counts: Counter[int] = Counter()
-    puzzle_episode_counts: Counter[str] = Counter()
-    puzzle_success_counts: Counter[str] = Counter()
-
-    unsolved_start = (
-        cfg.unsolved_penalty_start
-        if cfg.unsolved_penalty_start is not None
-        else cfg.unsolved_penalty
-    )
-    warmup_total = max(0, cfg.unsolved_penalty_warmup)
-
-    def current_unsolved_penalty(ep: int) -> float:
-        if warmup_total == 0 or cfg.unsolved_penalty == unsolved_start:
-            return cfg.unsolved_penalty
-        progress = min(1.0, max(0.0, ep / warmup_total))
-        return unsolved_start + progress * (cfg.unsolved_penalty - unsolved_start)
-
-    def current_penalty_scale(ep: int) -> float:
-        if cfg.penalty_warmup <= 0:
-            return 1.0
-        return min(1.0, max(0.0, ep / cfg.penalty_warmup))
-
-    def puzzle_weight(cfg: PuzzleConfig) -> float:
-        if not cfg.board_idx:
-            return 1.0
-        total = puzzle_episode_counts[cfg.board_idx]
-        if total == 0:
-            return 1.0
-        success = puzzle_success_counts[cfg.board_idx]
-        rate = success / total
-        return max(0.05, 1.0 - rate)
-
-    def choose_from_bucket(bucket: list[PuzzleConfig]) -> PuzzleConfig:
-        if not bucket:
-            return random.choice(configs)
-        weights = [puzzle_weight(cfg) for cfg in bucket]
-        return random.choices(bucket, weights=weights, k=1)[0]
-
-    def select_curriculum_config(ep: int) -> PuzzleConfig:
-        available_colors = [c for c, bucket in color_buckets.items() if bucket]
-        if available_colors:
-            weights: list[float] = []
-            for color in available_colors:
-                total = color_episode_counts[color]
-                success = color_success_counts[color]
-                if total == 0:
-                    weight = 1.0
-                else:
-                    success_rate = success / total
-                    weight = max(0.05, 1.0 - success_rate)
-                weights.append(weight)
-            chosen_color = random.choices(available_colors, weights=weights, k=1)[0]
-            return choose_from_bucket(color_buckets[chosen_color])
-
-        bucket5 = size_buckets.get(5, [])
-        bucket6 = size_buckets.get(6, [])
-        if bucket5 and bucket6:
-            duration = max(0, cfg.curriculum_six_prob_episodes)
-            if duration == 0:
-                prob_six = cfg.curriculum_six_prob_end
-            else:
-                progress = min(1.0, max(0.0, ep / duration))
-                prob_six = cfg.curriculum_six_prob_start + progress * (
-                    cfg.curriculum_six_prob_end - cfg.curriculum_six_prob_start
-                )
-            prob_six = max(0.0, min(1.0, prob_six))
-            if random.random() < prob_six:
-                return choose_from_bucket(bucket6)
-            return choose_from_bucket(bucket5)
-        return choose_from_bucket(configs)
-
-    global_step = 0
-    accumulation_counter = 0  # Track gradient accumulation across episodes
-    best_train = 0.0
-    best_validation: float | None = None
-    best_primary = -1.0
-
-    # Print training configuration
-    if cfg.gradient_accumulation_steps > 1:
-        effective_batch = cfg.batch_size * cfg.gradient_accumulation_steps
-        print(f"✓ Gradient Accumulation enabled: {cfg.gradient_accumulation_steps} steps (effective batch={effective_batch})")
-
-    try:
-        for episode in range(1, cfg.episodes + 1):
-            selected_config = select_curriculum_config(episode)
-            config = selected_config
-            # Override step cap if requested; otherwise let config/defaults apply (area + DEFAULT_STEP_BUFFER)
-            if cfg.steps_per_episode is not None:
-                config = replace(config, max_steps=cfg.steps_per_episode)
-
-            penalty = current_unsolved_penalty(episode)
-            penalty_scale = current_penalty_scale(episode)
-            env_reward = replace(
-                config.reward,
-                unsolved_penalty=penalty,
-                disconnect_penalty=cfg.disconnect_penalty * penalty_scale,
-                degree_penalty=cfg.degree_penalty * penalty_scale,
-                complete_color_bonus=cfg.complete_color_bonus,
-                solve_bonus=cfg.solve_bonus,
-            )
-            config = replace(config, reward=env_reward)
-            env = build_env(cfg, config)
-            schedule = (cfg.epsilon_schedule or "linear").lower()
-            if schedule == "linear":
-                epsilon = epsilon_by_step(
-                    episode,
-                    start=cfg.epsilon_start,
-                    end=cfg.epsilon_end,
-                    decay=cfg.epsilon_decay,
-                    schedule="linear",
-                    linear_total=cfg.epsilon_linear_steps or cfg.episodes,
-                )
-            else:
-                epsilon = epsilon_by_step(
-                    global_step,
-                    start=cfg.epsilon_start,
-                    end=cfg.epsilon_end,
-                    decay=cfg.epsilon_decay,
-                    schedule="exp",
-                )
-            record_frames: list[str] | None = None
-            capture_training_rollout = (
-                cfg.record_rollouts
-                and cfg.rollout_frequency > 0
-                and (cfg.rollout_max is None or rollouts_recorded < cfg.rollout_max)
-                and episode % cfg.rollout_frequency == 0
-            )
-            if capture_training_rollout:
-                record_frames = []
-
-            (
-                ep_reward,
-                ep_steps,
-                solved,
-                losses,
-                global_step,
-                constraint_penalty,
-                constraint_counts,
-                reward_breakdown,
-                accumulation_counter,
-            ) = run_episode(
-                env,
-                policy_net,
-                cfg=cfg,
-                epsilon=epsilon,
-                device=device,
-                rng=random,
-                buffer=buffer,
-                optimizer=optimizer,
-                target_net=target_net,
-                gamma=cfg.gamma,
-                batch_size=cfg.batch_size,
-                grad_clip=cfg.grad_clip,
-                global_step=global_step,
-                reward_scale=cfg.reward_scale,
-                reward_clamp=cfg.reward_clamp,
-                record_frames=record_frames,
-                expert_buffer=expert_buffer,
-                scaler=scaler,
-                accumulation_counter=accumulation_counter,
-            )
-
-            color_episode_counts[selected_config.color_count] += 1
-            if solved:
-                color_success_counts[selected_config.color_count] += 1
-            if selected_config.board_idx:
-                puzzle_episode_counts[selected_config.board_idx] += 1
-                if solved:
-                    puzzle_success_counts[selected_config.board_idx] += 1
-
-            if global_step % max(1, cfg.target_update) == 0:
-                target_net.load_state_dict(policy_net.state_dict())
-
-            avg_loss = sum(losses) / len(losses) if losses else 0.0
-            dead_hits = constraint_counts.get("dead_pocket", 0)
-            disconnect_hits = constraint_counts.get("disconnect", 0)
-            degree_hits = constraint_counts.get("degree", 0)
-            eval_success = ""
-            eval_reward = ""
-            val_success = ""
-            val_reward = ""
-            val_success_value: float | None = None
-            val_avg_reward: float | None = None
-
-            target_steps = config.max_steps or default_max_steps(config.width, config.height)
-            high_reward_unsolved = (
-                not solved
-                and target_steps > 0
-                and ep_steps >= 0.9 * target_steps
-                and ep_reward >= max(cfg.solve_bonus * 0.5, 5.0)
-            )
-            if high_reward_unsolved:
-                logger.log_metric("warn/high_reward_unsolved", float(ep_reward), episode)
-                if tb_writer is not None:
-                    tb_writer.add_scalar("warn/high_reward_unsolved", ep_reward, episode)
-                print(
-                    f"[warn] episode {episode} reward={ep_reward:.3f} steps={ep_steps} solved={solved} "
-                    f"(near max {target_steps})"
-                )
-
-            reward_window.append(ep_reward)
-            success_window.append(1 if solved else 0)
-            constraint_window.append(constraint_penalty)
-            rolling_reward = sum(reward_window) / len(reward_window)
-            rolling_success = sum(success_window) / len(success_window)
-            rolling_constraint = sum(constraint_window) / len(constraint_window)
-            with summary_path.open("a", encoding="utf-8", newline="") as handle:
-                handle.write(f"{episode},{rolling_reward:.4f},{rolling_success:.4f},{rolling_constraint:.4f}\n")
-            if (
-                record_frames is not None
-                and rollout_root is not None
-                and (solved or cfg.rollout_include_unsolved)
-                and (cfg.rollout_max is None or rollouts_recorded < cfg.rollout_max)
-            ):
-                json_path, gif_path, meta_path = save_rollout_frames(
-                    record_frames,
-                    rollout_root,
-                    config,
-                    episode=episode,
-                    solved=solved,
-                    total_reward=ep_reward,
-                    tag="train",
-                    make_gif=cfg.rollout_make_gif,
-                    gif_duration=cfg.rollout_gif_duration,
-                    board_idx=config.board_idx,
-                    reward_breakdown=reward_breakdown,
-                )
-                rollouts_recorded += 1
-                print(f"[rollout] Saved training episode {episode} to {json_path}")
-                logger.log_artifact(json_path)
-                logger.log_artifact(meta_path)
-                if gif_path is not None:
-                    logger.log_artifact(gif_path)
-            if cfg.eval_interval > 0 and episode % cfg.eval_interval == 0:
-                success_rate, avg_eval_reward, _ = evaluate_policy(
-                    policy_net,
-                    configs,
-                    device=device,
-                    episodes=cfg.eval_episodes,
-                    seed=cfg.seed + episode,
-                    epsilon=cfg.eval_epsilon,
-                    cfg=cfg,
-                    record_details=False,
-                )
-                eval_success = f"{success_rate:.3f}"
-                eval_reward = f"{avg_eval_reward:.3f}"
-                best_train = max(best_train, success_rate)
-                logger.log_metric("eval/success_rate", success_rate, episode)
-                logger.log_metric("eval/avg_reward", avg_eval_reward, episode)
-                if tb_writer is not None:
-                    tb_writer.add_scalar("eval/success_rate", success_rate, episode)
-                    tb_writer.add_scalar("eval/avg_reward", avg_eval_reward, episode)
-                primary_metric = success_rate
-                primary_reward = avg_eval_reward
-                if validation_configs:
-                    val_episodes = cfg.validation_eval_episodes or len(validation_configs)
-                    if val_episodes > 0:
-                        val_success_value, val_avg_reward, _ = evaluate_policy(
-                            policy_net,
-                            validation_configs,
-                            device=device,
-                            episodes=val_episodes,
-                            seed=cfg.seed + episode + 10_000,
-                            epsilon=cfg.eval_epsilon,
-                            cfg=cfg,
-                            record_details=False,
-                        )
-                        val_success = f"{val_success_value:.3f}"
-                        val_reward = f"{val_avg_reward:.3f}"
-                        if best_validation is None or val_success_value > best_validation:
-                            best_validation = val_success_value
-                        logger.log_metric("val/success_rate", val_success_value, episode)
-                        logger.log_metric("val/avg_reward", val_avg_reward, episode)
-                        if tb_writer is not None:
-                            tb_writer.add_scalar("val/success_rate", val_success_value, episode)
-                            tb_writer.add_scalar("val/avg_reward", val_avg_reward, episode)
-                        primary_metric = val_success_value
-                        primary_reward = val_avg_reward
-                if primary_metric > best_primary:
-                    best_primary = primary_metric
-                    torch.save(policy_net.state_dict(), log_dir / "best.pt")
-                    if (
-                        cfg.record_rollouts
-                        and rollout_root is not None
-                        and (cfg.rollout_max is None or rollouts_recorded < cfg.rollout_max)
-                    ):
-                        eval_pool = validation_configs if val_success_value is not None and validation_configs else configs
-                        eval_config = random.choice(eval_pool)
-                        frames, eval_solved, eval_total_reward = collect_policy_rollout(
-                            policy_net,
-                            eval_config,
-                            device=device,
-                            epsilon=cfg.eval_epsilon,
-                            seed=cfg.seed + episode + 1,
-                            cfg=cfg,
-                        )
-                        if eval_solved or cfg.rollout_include_unsolved:
-                            json_path, gif_path, meta_path = save_rollout_frames(
-                                frames,
-                                rollout_root,
-                                eval_config,
-                                episode=episode,
-                                solved=eval_solved,
-                                total_reward=eval_total_reward,
-                                tag="eval",
-                                make_gif=cfg.rollout_make_gif,
-                                gif_duration=cfg.rollout_gif_duration,
-                                board_idx=eval_config.board_idx,
-                                reward_breakdown=None,
-                            )
-                            rollouts_recorded += 1
-                            print(f"[rollout] Saved evaluation snapshot at episode {episode} to {json_path}")
-                            logger.log_artifact(json_path)
-                            logger.log_artifact(meta_path)
-                            if gif_path is not None:
-                                logger.log_artifact(gif_path)
-                msg = (
-                    f"[eval] episode={episode} train_success={success_rate:.3f} "
-                    f"train_reward={avg_eval_reward:.3f}"
-                )
-                if val_success_value is not None and val_avg_reward is not None:
-                    msg += f" val_success={val_success_value:.3f} val_reward={val_avg_reward:.3f}"
-                msg += f" buffer={len(buffer)}"
-                print(msg)
-                if eval_callback is not None:
-                    eval_callback(episode, success_rate, avg_eval_reward)
-
-            reward_json = json.dumps(reward_breakdown, sort_keys=True)
-            reward_json_escaped = reward_json.replace('"', '""')
-            with metrics_path.open("a", encoding="utf-8", newline="") as handle:
-                handle.write(
-                    f"{episode},{ep_reward:.4f},{ep_steps},{epsilon:.4f},{avg_loss:.6f},{int(solved)},"
-                    f"{constraint_penalty:.4f},{dead_hits},{disconnect_hits},{degree_hits},{eval_success},{eval_reward},"
-                    f"{val_success},{val_reward},{config.width},{config.color_count},\"{reward_json_escaped}\"\n"
-                )
-
-            # MLflow logging
-            logger.log_metric("train/total_reward", ep_reward, episode)
-            logger.log_metric("train/avg_loss", avg_loss, episode)
-            logger.log_metric("train/epsilon", epsilon, episode)
-            logger.log_metric("train/solved", float(int(solved)), episode)
-            logger.log_metric("train/constraint_penalty", constraint_penalty, episode)
-            logger.log_metric("train/buffer_size", float(len(buffer)), episode)
-
-            # Log reward breakdown components
-            if reward_breakdown:
-                for component, total_value in reward_breakdown.items():
-                    logger.log_metric(f"reward_components/{component}", total_value, episode)
-
-            # TensorBoard logging (if available)
-            if tb_writer is not None:
-                tb_writer.add_scalar("train/total_reward", ep_reward, episode)
-                tb_writer.add_scalar("train/avg_loss", avg_loss, episode)
-                tb_writer.add_scalar("train/epsilon", epsilon, episode)
-                tb_writer.add_scalar("train/solved", float(int(solved)), episode)
-                tb_writer.add_scalar("train/constraint_penalty", constraint_penalty, episode)
-                tb_writer.add_scalar("train/buffer_size", float(len(buffer)), episode)
-                tb_writer.add_scalar("train/steps", ep_steps, episode)
-                tb_writer.add_scalar("train/constraint_penalty", constraint_penalty, episode)
-
-                # Log reward breakdown to TensorBoard
-                if reward_breakdown:
-                    for component, total_value in reward_breakdown.items():
-                        tb_writer.add_scalar(f"reward_components/{component}", total_value, episode)
-
-            if cfg.log_every and episode % cfg.log_every == 0:
-                print(
-                    f"[train] episode={episode}/{cfg.episodes} reward={ep_reward:.3f} "
-                    f"steps={ep_steps} epsilon={epsilon:.3f} avg_loss={avg_loss:.4f} "
-                    f"solved={int(solved)} buffer={len(buffer)}"
-                )
-
-        torch.save(policy_net.state_dict(), cfg.output)
-        primary_best = best_validation if best_validation is not None else best_train
-        logger.log_metric("final/best_success_rate", primary_best, cfg.episodes)
-        logger.log_metric("final/best_train_success", best_train, cfg.episodes)
-        if best_validation is not None:
-            logger.log_metric("final/best_validation_success", best_validation, cfg.episodes)
-        logger.log_metric("final/episodes", float(cfg.episodes), cfg.episodes)
-        logger.log_metric("final/buffer_size", float(len(buffer)), cfg.episodes)
-        logger.log_artifact(metrics_path)
-        if (log_dir / "best.pt").exists():
-            logger.log_artifact(log_dir / "best.pt")
-        if Path(cfg.output).exists():
-            logger.log_artifact(cfg.output)
-
-        best_eval_score = best_primary
-
-    finally:
-        logger.close()
-        if tb_writer is not None:
-            tb_writer.close()
-
-    return cfg.output, best_train, best_validation
 
 __all__ = [
-    'DQNTrainingConfig',
+    'DQNTrainingConfig',  # DEPRECATED - use modular configs instead
+    'PuzzleConfig',
     'epsilon_by_step',
     'select_action',
     'compute_td_loss',
@@ -1391,9 +909,7 @@ __all__ = [
     'evaluate_policy',
     'collect_policy_rollout',
     'save_rollout_frames',
-    'ensure_log_dir',
-    'write_hyperparams',
-    'run_training',
+    'run_training',  # DEPRECATED - use DQNTrainer class instead
     'build_env',
 ]
 class FlowEnv(Protocol):
