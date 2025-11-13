@@ -74,7 +74,10 @@ HOLDOUT_ROLLOUT_MODE="both"
 HOLDOUT_GIF=true
 HOLDOUT_GIF_DURATION=140
 HOLDOUT_ROLLOUT_MAX=0
-
+TRACE_COMPLETION_MODES=("normal" "longest" "blocked")
+TRACE_MODE_OVERRIDE=false
+TRACE_VARIANTS=1
+TRACE_SHUFFLE=false
 
 LOG_DIR="logs"
 RUN_DIR="${LOG_DIR}/${RUN_ID}"
@@ -109,6 +112,9 @@ Usage: $0 [options]
   --batch-size N         Override DQN batch size (default: 64)
   --buffer-size N        Override replay buffer size (default: 80000)
   --trace-limit N        Limit number of traces generated (default: 3000)
+  --trace-mode MODE      Completion mode for trace generation (repeatable; default: normal)
+  --trace-variants N     Number of variants per puzzle in normal mode (default: 1)
+  --trace-shuffle        Shuffle color order variants in normal mode
   --supervised-epochs N  Override supervised epochs (default: 10)
   --supervised-batch-size N
   --supervised-lr LR     Override supervised learning rate (default: 1e-4)
@@ -165,7 +171,6 @@ while [[ $# -gt 0 ]]; do
             EPISODES=10
             EVAL_INTERVAL=10
             SUPERVISED_EPOCHS=2
-            TRACE_LIMIT=100
             ;;
         --episodes)
             EPISODES="$2"
@@ -182,6 +187,24 @@ while [[ $# -gt 0 ]]; do
         --trace-limit)
             TRACE_LIMIT="$2"
             shift
+            ;;
+        --trace-mode)
+            IFS=',' read -ra NEW_TRACE_MODES <<< "$2"
+            if [ "$TRACE_MODE_OVERRIDE" = false ]; then
+                TRACE_COMPLETION_MODES=()
+                TRACE_MODE_OVERRIDE=true
+            fi
+            for mode in "${NEW_TRACE_MODES[@]}"; do
+                TRACE_COMPLETION_MODES+=("$mode")
+            done
+            shift
+            ;;
+        --trace-variants)
+            TRACE_VARIANTS="$2"
+            shift
+            ;;
+        --trace-shuffle)
+            TRACE_SHUFFLE=true
             ;;
         --supervised-epochs)
             SUPERVISED_EPOCHS="$2"
@@ -429,13 +452,28 @@ if [ "$SKIP_TRACES" = false ]; then
     if [ -d "$TRACE_DIR" ] && [ "$(ls -A "$TRACE_DIR" 2>/dev/null | wc -l)" -gt 100 ]; then
         echo -e "${YELLOW}Traces already exist in $TRACE_DIR. Skipping...${NC}"
     else
-        python rl/env/generate_traces_from_completion.py \
-            --csv data/dqn_train.csv \
-            --out-dir "$TRACE_DIR" \
-            --max-size $MAX_SIZE \
-            --max-colors $MAX_COLORS \
-            --limit "$TRACE_LIMIT" \
-            --force
+        if [ "${#TRACE_COMPLETION_MODES[@]}" -eq 0 ]; then
+            TRACE_COMPLETION_MODES=("normal")
+        fi
+        TRACE_MODE_ARGS=()
+        for mode in "${TRACE_COMPLETION_MODES[@]}"; do
+            TRACE_MODE_ARGS+=(--completion-mode "$mode")
+        done
+
+        TRACE_CMD=(python -m rl.env.trace_generation.cli
+            --csv data/dqn_train.csv
+            --out-dir "$TRACE_DIR"
+            --max-size "$MAX_SIZE"
+            --max-colors "$MAX_COLORS"
+            --limit "$TRACE_LIMIT"
+            --variants "$TRACE_VARIANTS"
+        )
+        if [ "$TRACE_SHUFFLE" = true ]; then
+            TRACE_CMD+=(--shuffle-colors)
+        fi
+        TRACE_CMD+=("${TRACE_MODE_ARGS[@]}")
+
+        "${TRACE_CMD[@]}"
         echo -e "${GREEN}✓ Traces generated${NC}"
     fi
 else
