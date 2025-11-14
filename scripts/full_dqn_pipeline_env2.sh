@@ -663,9 +663,9 @@ if [ "${#EPS_LINEAR_ARGS[@]}" -gt 0 ]; then
     DQN_CMD+=("${EPS_LINEAR_ARGS[@]}")
 fi
 
-# if [ -n "$STEPS_PER_EPISODE" ]; then
-#     DQN_CMD+=(--steps-per-episode "$STEPS_PER_EPISODE")
-# fi
+if [ -n "$STEPS_PER_EPISODE" ]; then
+    DQN_CMD+=(--steps-per-episode "$STEPS_PER_EPISODE")
+fi
 
 if [ "$USE_AMP" = true ]; then
     DQN_CMD+=(--use-amp)
