@@ -1,3 +1,9 @@
+"""Supervised imitation training that mirrors the FlowQNetwork architecture.
+
+This script trains the full FlowQNetwork (backbone + Transformer action head)
+so the resulting checkpoint can be loaded directly before DQN fine-tuning.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -8,33 +14,35 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 
-from rl.solver.dataset import SupervisedTrajectoryDataset, discover_trace_files
 from rl.solver.constants import MAX_CHANNELS
-from rl.solver.policies.policy import FlowPolicy, masked_cross_entropy, save_policy
+from rl.solver.dataset import SupervisedTrajectoryDataset, discover_trace_files
+from rl.solver.policies.q_network import FlowQNetwork
 from rl.solver.observation import encode_observation, mask_to_tensor
 from rl.env.env import FlowFreeEnv
 from rl.env.config import EnvConfig, BoardShape, POTENTIAL_REWARD, DEFAULT_OBSERVATION
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Supervised warm-start training for FlowFree policies")
+    parser = argparse.ArgumentParser(description="Train FlowQNetwork via supervised imitation.")
     parser.add_argument(
         "--traces-dir",
         type=Path,
         nargs="+",
-        default=[Path("data/rl_traces/dqn_supervised")],
-        help="Directory or directories containing trajectory JSON traces",
+        default=[Path("data/rl_traces")],
+        help="Directories containing trajectory JSON traces.",
     )
-    parser.add_argument("--output", type=Path, default=Path("models/dqn_supervised_warmstart.pt"))
+    parser.add_argument("--output", type=Path, default=Path("models/dqn_supervised_transformer.pt"))
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--max-traces", type=int, default=None, help="Optional cap on number of trace files to load")
-    parser.add_argument("--val-ratio", type=float, default=0.1, help="Fraction of data reserved for validation")
+    parser.add_argument("--max-traces", type=int, default=None, help="Optional cap on the number of trace files.")
+    parser.add_argument("--val-ratio", type=float, default=0.1, help="Fraction of data reserved for validation.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--use-dueling", action="store_true", help="Match dueling head used in DQN.")
     parser.add_argument("--eval-puzzles", type=Path, default=None, help="CSV file with puzzles for solve rate evaluation")
     parser.add_argument("--eval-interval", type=int, default=5, help="Evaluate solve rate every N epochs")
     parser.add_argument("--eval-episodes", type=int, default=20, help="Number of puzzles to evaluate per interval")
@@ -52,13 +60,16 @@ def seed_everything(seed: int) -> None:
 
 def collate_batch(batch):
     states = torch.stack([ex.state for ex in batch])
-    masks = torch.stack([ex.action_mask for ex in batch]).to(torch.bool)
+    head_masks = torch.stack([ex.head_mask for ex in batch])
+    target_masks = torch.stack([ex.target_mask for ex in batch])
+    color_counts = torch.tensor([int(ex.colour_count.item()) for ex in batch], dtype=torch.long)
+    action_masks = torch.stack([ex.action_mask for ex in batch]).to(torch.bool)
     actions = torch.tensor([ex.action for ex in batch], dtype=torch.long)
-    return states, masks, actions
+    return states, head_masks, target_masks, color_counts, action_masks, actions
 
 
 def evaluate_solve_rate(
-    model: FlowPolicy,
+    model: FlowQNetwork,
     puzzles_csv: Path,
     device: torch.device,
     max_episodes: int = 20,
@@ -117,6 +128,9 @@ def evaluate_solve_rate(
                 # Encode observation using solver's encoding
                 encoded = encode_observation(obs, device=device)
                 state_tensor = encoded.state.unsqueeze(0)
+                head_mask = encoded.head_mask.unsqueeze(0)
+                target_mask = encoded.target_mask.unsqueeze(0)
+                color_count = torch.tensor([encoded.color_count], dtype=torch.long, device=device)
 
                 # Get action mask - use mask_to_tensor to properly pad it
                 action_mask = mask_to_tensor(
@@ -125,7 +139,13 @@ def evaluate_solve_rate(
                     color_count=obs["color_count"]
                 ).unsqueeze(0).bool()
 
-                logits = model(state_tensor, action_mask)
+                logits = model(
+                    state_tensor,
+                    head_masks=head_mask,
+                    target_masks=target_mask,
+                    color_counts=color_count,
+                )
+                logits = logits.masked_fill(~action_mask, -1e9)
                 action = torch.argmax(logits, dim=-1).item()
 
                 obs, reward, terminated, truncated, info = env.step(action)
@@ -150,7 +170,6 @@ def evaluate_solve_rate(
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
-
     seed_everything(args.seed)
 
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -158,9 +177,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     trace_files: list[Path] = []
     for root in args.traces_dir:
         trace_files.extend(discover_trace_files(root))
-
     if not trace_files:
-        raise SystemExit("No trajectory files found; generate traces before running supervised training.")
+        raise SystemExit("No trajectory files found. Generate traces before training.")
 
     trace_files = sorted(trace_files)
     if args.max_traces is not None:
@@ -173,18 +191,34 @@ def main(argv: Sequence[str] | None = None) -> None:
     val_size = int(len(dataset) * max(0.0, min(1.0, args.val_ratio)))
     train_size = len(dataset) - val_size
     if val_size > 0:
-        train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(args.seed))
+        train_dataset, val_dataset = random_split(
+            dataset,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(args.seed),
+        )
     else:
         train_dataset, val_dataset = dataset, None
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_batch)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_batch,
+        pin_memory=True,
+    )
     val_loader = (
-        DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_batch)
+        DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collate_batch,
+            pin_memory=True,
+        )
         if val_dataset is not None
         else None
     )
 
-    model = FlowPolicy(in_channels=MAX_CHANNELS).to(device)
+    model = FlowQNetwork(in_channels=MAX_CHANNELS, use_dueling=args.use_dueling).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     print(f"Loaded {len(trace_files)} traces → {len(dataset)} examples")
@@ -202,13 +236,23 @@ def main(argv: Sequence[str] | None = None) -> None:
         total = 0
         batches = 0
 
-        for states, masks, actions in train_loader:
+        for states, head_masks, target_masks, color_counts, action_masks, actions in train_loader:
             states = states.to(device)
-            masks = masks.to(device)
+            head_masks = head_masks.to(device)
+            target_masks = target_masks.to(device)
+            color_counts = color_counts.to(device)
+            action_masks = action_masks.to(device)
             actions = actions.to(device)
 
-            logits = model(states, masks)
-            loss = masked_cross_entropy(logits, actions)
+            logits = model(
+                states,
+                head_masks=head_masks,
+                target_masks=target_masks,
+                color_counts=color_counts,
+            )
+            logits = logits.masked_fill(~action_masks, -1e9)
+            loss = F.cross_entropy(logits, actions)
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -234,12 +278,22 @@ def main(argv: Sequence[str] | None = None) -> None:
             val_total = 0
 
             with torch.no_grad():
-                for states, masks, actions in val_loader:
+                for states, head_masks, target_masks, color_counts, action_masks, actions in val_loader:
                     states = states.to(device)
-                    masks = masks.to(device)
+                    head_masks = head_masks.to(device)
+                    target_masks = target_masks.to(device)
+                    color_counts = color_counts.to(device)
+                    action_masks = action_masks.to(device)
                     actions = actions.to(device)
-                    logits = model(states, masks)
-                    loss = masked_cross_entropy(logits, actions)
+
+                    logits = model(
+                        states,
+                        head_masks=head_masks,
+                        target_masks=target_masks,
+                        color_counts=color_counts,
+                    )
+                    logits = logits.masked_fill(~action_masks, -1e9)
+                    loss = F.cross_entropy(logits, actions)
                     total_val_loss += float(loss.item())
 
                     # Track accuracy
@@ -254,7 +308,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_model_path.parent.mkdir(parents=True, exist_ok=True)
-                save_policy(model.cpu(), best_model_path)
+                torch.save(model.cpu().state_dict(), best_model_path)
                 model.to(device)
                 print(f"  → New best model saved (val_loss={val_loss:.6f})")
 
@@ -277,7 +331,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             print(f"  → Solve rate: {eval_metrics['solve_rate']:.1f}% ({eval_metrics['puzzles_tested']} puzzles) | Avg reward: {eval_metrics['avg_reward']:.2f}")
 
-    save_policy(model.cpu(), args.output)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), args.output)
     print(f"\nSaved final policy to {args.output}")
     if best_model_path.exists():
         print(f"Best model saved to {best_model_path} (val_loss={best_val_loss:.6f})")
@@ -287,7 +342,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"\nRunning final puzzle solve evaluation...")
         # Load best model for final eval
         if best_model_path.exists():
-            model = FlowPolicy(in_channels=MAX_CHANNELS)
+            model = FlowQNetwork(in_channels=MAX_CHANNELS, use_dueling=args.use_dueling)
             model.load_state_dict(torch.load(best_model_path))
             model.to(device)
             print(f"  Using best model from {best_model_path}")

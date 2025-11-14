@@ -514,13 +514,7 @@ class DQNTrainer:
 
         # Load supervised warm-start if provided
         if policy_init is not None and policy_init.exists():
-            supervised_policy = FlowPolicy(in_channels=MAX_CHANNELS)
-            load_policy(supervised_policy, policy_init, map_location=self.device)
-            policy_net.backbone.load_state_dict(
-                supervised_policy.backbone.state_dict(),
-                strict=False,
-            )
-            print(f"Loaded supervised backbone weights from {policy_init}")
+            self._load_supervised_init(policy_net, policy_init)
 
         # Create target network as copy of policy network
         target_net = FlowQNetwork(
@@ -531,6 +525,34 @@ class DQNTrainer:
         target_net.eval()
 
         return policy_net, target_net
+
+    def _load_supervised_init(self, policy_net: FlowQNetwork, checkpoint: Path) -> None:
+        """Load supervised warm-start weights into the policy network."""
+        state = torch.load(checkpoint, map_location=self.device)
+        if any(key.startswith("policy_head.") for key in state.keys()):
+            # Legacy FlowPolicy checkpoint: reuse backbone weights only.
+            supervised_policy = FlowPolicy(in_channels=MAX_CHANNELS)
+            supervised_policy.load_state_dict(state)
+            policy_net.backbone.load_state_dict(
+                supervised_policy.backbone.state_dict(),
+                strict=False,
+            )
+            print(f"Loaded supervised CNN backbone from {checkpoint}")
+            return
+
+        # FlowQNetwork-style checkpoint (transformer head). Optionally drop value head if dueling is disabled.
+        if not self.training_config.use_dueling:
+            state = {k: v for k, v in state.items() if not k.startswith("value_head.")}
+
+        load_result = policy_net.load_state_dict(state, strict=False)
+        missing = getattr(load_result, "missing_keys", [])
+        unexpected = getattr(load_result, "unexpected_keys", [])
+
+        if missing:
+            print(f"[warn] Missing keys when loading {checkpoint}: {missing}")
+        if unexpected:
+            print(f"[warn] Ignoring unexpected keys from {checkpoint}: {unexpected}")
+        print(f"Loaded transformer-aligned policy weights from {checkpoint}")
 
     def _apply_episode_config(self, config: PuzzleConfig, episode: int) -> PuzzleConfig:
         """Apply episode-specific configuration overrides.
