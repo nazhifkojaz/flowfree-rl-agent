@@ -27,16 +27,16 @@ cd "$PROJECT_ROOT"
 
 # Defaults (tune as needed)
 RUN_ID="dqn_$(date +%Y%m%d-%H%M%S)"
-EPISODES=4000
+EPISODES=5000
 BATCH_SIZE=192
-BUFFER_SIZE=80000
+BUFFER_SIZE=100000
 TRACE_LIMIT=3000
 MIN_SIZE=5
 MAX_SIZE=5
 MAX_COLORS=10
 SEED=42
 EVAL_INTERVAL=100
-EVAL_EPISODES=20
+EVAL_EPISODES=25
 LOG_EVERY=25
 ENV2_CHANNELS=("occupancy" "endpoints" "heads" "free" "congestion" "distance")
 ENV2_REWARD="potential"
@@ -48,26 +48,26 @@ EPSILON_END=0.10
 EPSILON_DECAY=20000
 CONSTRAINT_FREE_BONUS=0.0  # DISABLED
 PENALTY_WARMUP=800
-DISCONNECT_PENALTY=-0.06
+DISCONNECT_PENALTY=-0.08
 DEGREE_PENALTY=-0.08
 INVALID_PENALTY=-0.3
 COMPLETE_SUSTAIN_BONUS=0.0  # DISABLED
-COMPLETE_REVERT_PENALTY=0.0  # DISABLED (was 2.0)
-UNDO_PENALTY=-0.12
+COMPLETE_REVERT_PENALTY=2.5
+UNDO_PENALTY=-0.15
 EPSILON_SCHEDULE="linear"
 EPSILON_LINEAR_STEPS="4000"
-UNSOLVED_PENALTY=-4.0
+UNSOLVED_PENALTY=-5.0
 UNSOLVED_PENALTY_START=0.0
-UNSOLVED_PENALTY_WARMUP=500
+UNSOLVED_PENALTY_WARMUP=800
 CURRICULUM_SIX_START=0.0
 CURRICULUM_SIX_END=0.0
 CURRICULUM_SIX_EPISODES=0
 LOOP_PENALTY=-1.8
-LOOP_WINDOW=6
+LOOP_WINDOW=4
 PROGRESS_BONUS=0.015
-STEPS_PER_EPISODE=""
+STEPS_PER_EPISODE=80
 EXPERT_BUFFER_SIZE=5000
-EXPERT_SAMPLE_RATIO=0.20
+EXPERT_SAMPLE_RATIO=0.10
 USE_AMP=true
 GRADIENT_ACCUMULATION_STEPS=2
 DISABLE_TENSORBOARD=false
@@ -75,10 +75,11 @@ HOLDOUT_ROLLOUT_MODE="both"
 HOLDOUT_GIF=true
 HOLDOUT_GIF_DURATION=140
 HOLDOUT_ROLLOUT_MAX=0
-TRACE_COMPLETION_MODES=("normal" "longest" "blocked")
+TRACE_COMPLETION_MODES=("longest" "blocked" "oneattime")
 TRACE_MODE_OVERRIDE=false
 TRACE_VARIANTS=1
 TRACE_SHUFFLE=false
+LOCAL_PROFILE=false
 
 LOG_DIR="logs"
 RUN_DIR="${LOG_DIR}/${RUN_ID}"
@@ -93,6 +94,10 @@ fi
 SUPERVISED_EPOCHS=10
 SUPERVISED_BATCH_SIZE=64
 SUPERVISED_LR=0.0001
+SUPERVISED_EVAL_PUZZLES="data/dqn_val.csv"  # CSV file for puzzle solve evaluation (optional)
+SUPERVISED_EVAL_INTERVAL=5   # Evaluate every N epochs
+SUPERVISED_EVAL_EPISODES=20  # Number of puzzles to evaluate
+SUPERVISED_MAX_STEPS=50      # Max steps per evaluation episode
 
 # Flags
 SKIP_DATA_SPLIT=false
@@ -109,16 +114,21 @@ Usage: $0 [options]
   --skip-supervised      Skip supervised warm start
   --simple-rewards       Use potential-based reward preset
   --quick                Fast settings (50 episodes, fewer epochs)
-  --episodes N           Override episode count (default: 4000)
-  --batch-size N         Override DQN batch size (default: 64)
-  --buffer-size N        Override replay buffer size (default: 80000)
+  --episodes N           Override episode count (default: 5000)
+  --batch-size N         Override DQN batch size (default: 192)
+  --buffer-size N        Override replay buffer size (default: 100000)
   --trace-limit N        Limit number of traces generated (default: 3000)
   --trace-mode MODE      Completion mode for trace generation (repeatable; default: normal)
   --trace-variants N     Number of variants per puzzle in normal mode (default: 1)
   --trace-shuffle        Shuffle color order variants in normal mode
+  --local-profile        Apply GTX 1050 Ti–friendly defaults (episodes 2500, batch 96, buffer 60k, etc.)
   --supervised-epochs N  Override supervised epochs (default: 10)
   --supervised-batch-size N
   --supervised-lr LR     Override supervised learning rate (default: 1e-4)
+  --supervised-eval-puzzles CSV  CSV file for puzzle solve evaluation (optional)
+  --supervised-eval-interval N   Evaluate solve rate every N epochs (default: 5)
+  --supervised-eval-episodes N   Number of puzzles to evaluate (default: 20)
+  --supervised-max-steps N       Max steps per evaluation episode (default: 50)
   --epsilon-start VAL    Starting epsilon for DQN (default: 1.0)
   --epsilon-end VAL      Ending epsilon for DQN (default: 0.10)
   --complete-bonus VAL   Completion reward bonus (default: 1.8)
@@ -208,6 +218,9 @@ while [[ $# -gt 0 ]]; do
         --trace-shuffle)
             TRACE_SHUFFLE=true
             ;;
+        --local-profile)
+            LOCAL_PROFILE=true
+            ;;
         --supervised-epochs)
             SUPERVISED_EPOCHS="$2"
             shift
@@ -218,6 +231,22 @@ while [[ $# -gt 0 ]]; do
             ;;
         --supervised-lr)
             SUPERVISED_LR="$2"
+            shift
+            ;;
+        --supervised-eval-puzzles)
+            SUPERVISED_EVAL_PUZZLES="$2"
+            shift
+            ;;
+        --supervised-eval-interval)
+            SUPERVISED_EVAL_INTERVAL="$2"
+            shift
+            ;;
+        --supervised-eval-episodes)
+            SUPERVISED_EVAL_EPISODES="$2"
+            shift
+            ;;
+        --supervised-max-steps)
+            SUPERVISED_MAX_STEPS="$2"
             shift
             ;;
         --epsilon-start)
@@ -395,6 +424,25 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+if [ "$LOCAL_PROFILE" = true ]; then
+    echo -e "${YELLOW}Applying local GTX 1050 Ti profile overrides${NC}"
+    EPISODES=2000
+    BATCH_SIZE=64
+    BUFFER_SIZE=60000
+    EPSILON_END=0.05
+    EPSILON_LINEAR_STEPS=1500
+    LOOP_PENALTY=-0.8
+    LOOP_WINDOW=10
+    UNDO_PENALTY=-0.18
+    PENALTY_WARMUP=500
+    EXPERT_BUFFER_SIZE=5000
+    EXPERT_SAMPLE_RATIO=0.08
+    STEPS_PER_EPISODE=50
+    LOG_EVERY=20
+    USE_AMP=false
+    GRADIENT_ACCUMULATION_STEPS=1
+fi
+
 echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║          Full DQN Training Pipeline (Env2 Backend)         ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
@@ -490,8 +538,8 @@ echo ""
 ################################################################################
 # Step 3: Supervised Pre-training
 ################################################################################
-SUPERVISED_MODEL="models/dqn_supervised_warmstart.pt"
-SUPERVISED_SCRIPT="rl/solver/train_supervised.py"
+SUPERVISED_MODEL="models/dqn_supervised_transformer.pt"
+SUPERVISED_SCRIPT="rl/solver/train_supervised_transformer.py"
 if [ "$SKIP_SUPERVISED" = false ]; then
     echo -e "${CYAN}Step 3/5: Supervised warm-start${NC}"
     if [ ! -f "$SUPERVISED_SCRIPT" ]; then
@@ -501,15 +549,29 @@ if [ "$SKIP_SUPERVISED" = false ]; then
         echo -e "${YELLOW}No traces found. Skipping supervised training.${NC}"
         SKIP_SUPERVISED=true
     else
-        python "$SUPERVISED_SCRIPT" \
-            --traces-dir "$TRACE_DIR" \
-            --output "$SUPERVISED_MODEL" \
-            --epochs $SUPERVISED_EPOCHS \
-            --batch-size $SUPERVISED_BATCH_SIZE \
-            --lr $SUPERVISED_LR \
-            --device cuda \
+        SUPERVISED_CMD=(
+            python "$SUPERVISED_SCRIPT"
+            --traces-dir "$TRACE_DIR"
+            --output "$SUPERVISED_MODEL"
+            --epochs $SUPERVISED_EPOCHS
+            --batch-size $SUPERVISED_BATCH_SIZE
+            --lr $SUPERVISED_LR
+            --device cuda
             --seed $SEED
-            # --max-colors $MAX_COLORS \
+            --use-dueling
+        )
+
+        # Add evaluation arguments if provided
+        if [ -n "$SUPERVISED_EVAL_PUZZLES" ] && [ -f "$SUPERVISED_EVAL_PUZZLES" ]; then
+            SUPERVISED_CMD+=(
+                --eval-puzzles "$SUPERVISED_EVAL_PUZZLES"
+                --eval-interval $SUPERVISED_EVAL_INTERVAL
+                --eval-episodes $SUPERVISED_EVAL_EPISODES
+                --max-steps $SUPERVISED_MAX_STEPS
+            )
+        fi
+
+        "${SUPERVISED_CMD[@]}"
         echo -e "${GREEN}✓ Supervised training completed${NC}"
     fi
 else
@@ -601,9 +663,9 @@ if [ "${#EPS_LINEAR_ARGS[@]}" -gt 0 ]; then
     DQN_CMD+=("${EPS_LINEAR_ARGS[@]}")
 fi
 
-if [ -n "$STEPS_PER_EPISODE" ]; then
-    DQN_CMD+=(--steps-per-episode "$STEPS_PER_EPISODE")
-fi
+# if [ -n "$STEPS_PER_EPISODE" ]; then
+#     DQN_CMD+=(--steps-per-episode "$STEPS_PER_EPISODE")
+# fi
 
 if [ "$USE_AMP" = true ]; then
     DQN_CMD+=(--use-amp)
@@ -615,10 +677,10 @@ if [ "$DISABLE_TENSORBOARD" = true ]; then
     echo -e "${GREEN}TensorBoard disabled${NC}"
 fi
 
-if [ "$SKIP_SUPERVISED" = false ] && [ -f "$SUPERVISED_MODEL" ]; then
-    DQN_CMD+=(--policy-init "$SUPERVISED_MODEL")
-    echo -e "${GREEN}Using supervised warm-start: $SUPERVISED_MODEL${NC}"
-fi
+# if [ "$SKIP_SUPERVISED" = false ] && [ -f "$SUPERVISED_MODEL" ]; then
+#     DQN_CMD+=(--policy-init "$SUPERVISED_MODEL")
+#     echo -e "${GREEN}Using supervised warm-start: $SUPERVISED_MODEL${NC}"
+# fi
 
 if [ "$USE_SIMPLE_REWARDS" = true ]; then
     DQN_CMD+=(--simple-rewards)
@@ -694,9 +756,9 @@ else
         EVAL_CMD+=(--gif)
     fi
 
-    if [ -n "$STEPS_PER_EPISODE" ]; then
-        EVAL_CMD+=(--steps-per-episode "$STEPS_PER_EPISODE")
-    fi
+    # if [ -n "$STEPS_PER_EPISODE" ]; then
+    #     EVAL_CMD+=(--steps-per-episode "$STEPS_PER_EPISODE")
+    # fi
 
     # Run evaluation
     "${EVAL_CMD[@]}" | tee "$RUN_DIR/test_results.txt"
