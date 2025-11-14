@@ -68,9 +68,12 @@ def compute_full_mask(state: BoardState) -> np.ndarray:
     mask = np.zeros(state.shape.action_dim, dtype=np.int8)
     for color in range(state.shape.color_count):
         start = color * ACTIONS_PER_COLOR
-        if len(state.paths[color]) > 1:
+        path_len = len(state.paths[color])
+        if path_len > 1:
             mask[start + UNDO_INDEX] = 1
-        if state.completed[color] and len(state.paths[color]) <= 1:
+
+        # Completed colours should only allow undo (if available)
+        if state.completed[color]:
             continue
         head = state.head_positions[color]
         hr, hc = divmod(head, state.shape.width)
