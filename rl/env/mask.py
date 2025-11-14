@@ -14,16 +14,7 @@ class ActionMasker:
         return compute_full_mask(state)
 
     def update(self, state: BoardState, mask: np.ndarray, diff) -> np.ndarray:
-        if diff is None or self.config.strategy != "incremental":
-            return compute_full_mask(state)
-
-        updated = mask.copy()
-        self._write_color_mask(state, diff.color, updated)
-        if self.config.track_neighbors:
-            affected = self._neighboring_colors(state, diff)
-            for color in affected:
-                self._write_color_mask(state, color, updated)
-        return updated
+        return compute_full_mask(state)
 
     def _neighboring_colors(self, state: BoardState, diff) -> set[int]:
         touched = set(diff.touched_indices)
